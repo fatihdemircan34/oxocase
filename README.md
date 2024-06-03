@@ -19,7 +19,7 @@ Bu proje, APK Mirror'dan veri çekmek için Moleculer, MongoDB, PostgreSQL ve Re
    ```bash
    git clone https://github.com/kullanici/oxo4case.git
    cd oxo4case
-   ```
+ 
 
 2. **Docker Kullanarak Veritabanlarını Başlatma:**
 
