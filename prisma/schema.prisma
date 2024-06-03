@@ -1,0 +1,16 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model apk_distribution {
+  id                   Int      @id @default(autoincrement())
+  distribution_number  String
+  mongodb_id           String
+  created_at           DateTime @default(now())
+  updated_at           DateTime @updatedAt
+}

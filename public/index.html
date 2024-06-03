@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>APK Versiyon Yönetimi</title>
+	<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+	<div id="login-container">
+		<h2>Giriş Yap</h2>
+		<input type="text" id="username" placeholder="Kullanıcı Adı">
+		<input type="password" id="password" placeholder="Şifre">
+		<button onclick="login()">Giriş</button>
+	</div>
+
+	<div id="versions-container" style="display: none;">
+		<h2>Versiyonlar</h2>
+		<ul id="version-list"></ul>
+	</div>
+
+	<div id="version-details-container" style="display: none;">
+		<h2>Versiyon Ayrıntıları</h2>
+		<div id="version-details"></div>
+		<button onclick="editVersion()">Düzenle</button>
+		<button onclick="deleteVersion()">Sil</button>
+	</div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>

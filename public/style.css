@@ -1,0 +1,10 @@
+/* Basit stilleme örnekleri */
+#app {
+	font-family: sans-serif;
+}
+
+#login-container, #versions-container, #version-details-container {
+	border: 1px solid #ccc;
+	padding: 20px;
+	margin-bottom: 20px;
+}
