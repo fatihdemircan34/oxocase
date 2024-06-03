@@ -16,19 +16,45 @@ module.exports = {
 
 		getVersions: {
 			async handler(ctx) {
-				const { appName, limit = 10 } = ctx.params;
-				const apks = await ctx.call("db.mongoFind", {
+				const { limit = 10 } = ctx.params;
+
+				// Fetch data from MongoDB
+				const mongoApks = await ctx.call("db.mongoFind", {
 					collection: "Apk",
-					query: { appName }
+					query: {},
+					limit: limit
 				});
 
-				return apks.slice(0, limit).map(apk => ({
-					versionId: apk._id,
-					releaseDate: apk.release_date,
-					totalVariants: apk.variants.length
+				// Fetch corresponding data from PostgreSQL
+				const combinedApks = await Promise.allSettled(mongoApks.map(async (apk) => {
+					const pgData = await ctx.call("db.pgQuery", {
+						query: "SELECT * FROM apk_distribution WHERE mongodb_id = $1",
+						values: [apk._id]
+					});
+					const pgRecord = pgData[0] || {}; // If no record is found, use an empty object
+					return {
+						appName: apk.app_name,
+						versionId: apk._id,
+						releaseDate: apk.release_date,
+						totalVariants: apk.variants.length,
+						distributionNumber: pgRecord.distribution_number || null
+					};
 				}));
+
+				// Extract values from Promise.allSettled results
+				const results = combinedApks.map(result => {
+					if (result.status === 'fulfilled') {
+						return result.value;
+					} else {
+						console.error('Error fetching data:', result.reason);
+						return null;
+					}
+				}).filter(result => result !== null);
+
+				return results;
 			}
 		},
+
 
 		getVersionDetails: {
 			params: {
@@ -36,19 +62,25 @@ module.exports = {
 			},
 			async handler(ctx) {
 				const { id } = ctx.params;
-				const apk = await ctx.call("db.mongoFind", {
+				const version = await ctx.call("db.mongoFind", {
 					collection: "Apk",
 					query: { _id: id }
 				});
 
-				if (!apk) {
-					throw new Error("APK not found");
+				if (!version) {
+					throw new Error("Version not found");
 				}
 
-				return {
-					versionId: apk._id,
-					variants: apk.variants
-				};
+				if (!version.variants) {
+					throw new Error("variant not found");
+				}
+
+				return version.variants.map(variant => ({
+					variantId: variant._id,
+					architecture: variant.architecture,
+					minAndroidVersion: variant.minAndroid,
+					dpi: variant.dpi
+				}));
 			}
 		},
 
@@ -59,12 +91,12 @@ module.exports = {
 			},
 			async handler(ctx) {
 				const { id, data } = ctx.params;
-				const updatedApk = await ctx.call("db.mongoUpdate", {
+				const updatedVersion = await ctx.call("db.mongoUpdate", {
 					collection: "Apk",
 					filter: { _id: id },
 					update: { $set: data }
 				});
-				return updatedApk;
+				return updatedVersion;
 			}
 		},
 
@@ -78,7 +110,7 @@ module.exports = {
 					collection: "Apk",
 					filter: { _id: id }
 				});
-				return { message: "APK deleted successfully" };
+				return { message: "Version deleted successfully" };
 			}
 		},
 
@@ -191,9 +223,7 @@ module.exports = {
 				{ appName: 'youtube', url: 'https://www.apkmirror.com/uploads/?appcategory=youtube' }
 			];
 
-			for (const app of apps) {
-				await this.broker.call("scraper.scrapeApkMirrorUploads", app);
-			}
+		 	await Promise.allSettled(apps.map(app => this.broker.call("scraper.scrapeApkMirrorUploads", app)));
 		});
 	}
 };

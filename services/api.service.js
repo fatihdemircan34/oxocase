@@ -1,199 +1,51 @@
-const DbService = require("moleculer-db");
+const ApiGateway = require("moleculer-web");
+const jwt = require("jsonwebtoken");
 
 module.exports = {
-	name: "apk",
-	mixins: [DbService],
-	actions: {
-		fetchApkData: {
-			params: {
-				appName: "string",
-				url: "string"
+	name: "api",
+	mixins: [ApiGateway],
+
+	settings: {
+		port: 8080,
+		routes: [{
+			path: "/api/auth",
+			aliases: {
+				"POST register": "auth.register",
+				"POST login": "auth.login",
+			}
+		}, {
+			path: "/api",
+			aliases: {
+				"GET /versions": "apk.getVersions",
+				"GET /versions/:id": "apk.getVersionDetails",
+				"PUT /versions/:id": "apk.updateVersion",
+				"DELETE /versions/:id": "apk.deleteVersion",
+				"POST /check-compatibility": "apk.checkCompatibility"
 			},
-			async handler(ctx) {
-				await ctx.call("scraper.scrapeApkMirrorUploads", { url, appName });
-			}
-		},
+			authorization: true,
+		}],
+		JWT_SECRET: process.env.JWT_SECRET || "s3cr3tKEY",
 
-		getVersions: {
-			async handler(ctx) {
-				const { appName, limit = 10 } = ctx.params;
-				const apks = await ctx.call("db.mongoFind", {
-					collection: "Apk",
-					query: { appName }
-				});
-
-				return apks.slice(0, limit).map(apk => ({
-					versionId: apk._id,
-					releaseDate: apk.release_date,
-					totalVariants: apk.variants.length
-				}));
-			}
-		},
-
-		getVersionDetails: {
-			params: {
-				id: "string"
-			},
-			async handler(ctx) {
-				const { id } = ctx.params;
-				const apk = await ctx.call("db.mongoFind", {
-					collection: "Apk",
-					query: { _id: id }
-				});
-
-				if (!apk) {
-					throw new Error("APK not found");
-				}
-
-				return {
-					versionId: apk._id,
-					variants: apk.variants
-				};
-			}
-		},
-
-		updateVersion: {
-			params: {
-				id: "string",
-				data: "object"
-			},
-			async handler(ctx) {
-				const { id, data } = ctx.params;
-				const updatedApk = await ctx.call("db.mongoUpdate", {
-					collection: "Apk",
-					filter: { _id: id },
-					update: { $set: data }
-				});
-				return updatedApk;
-			}
-		},
-
-		deleteVersion: {
-			params: {
-				id: "string"
-			},
-			async handler(ctx) {
-				const { id } = ctx.params;
-				await ctx.call("db.mongoDelete", {
-					collection: "Apk",
-					filter: { _id: id }
-				});
-				return { message: "APK deleted successfully" };
-			}
-		},
-
-		checkCompatibility: {
-			params: {
-				agent: "string"
-			},
-			async handler(ctx) {
-				const { agent } = ctx.params;
-				const parsedData = this.parseAgentString(agent);
-
-				const variant = await ctx.call("db.mongoFind", {
-					collection: "Variant",
-					query: { variant_id: parsedData.variantId }
-				});
-
-				if (!variant) {
-					throw new Error("Variant not found");
-				}
-
-				const isCompatible = this.compareVersions(parsedData.android_version, variant.min_sdk_version) &&
-					parsedData.dpi === variant.dpi;
-
-				return {
-					status: isCompatible ? "success" : "fail",
-					message: isCompatible ? "Compatible" : `Minimum Android version required: ${variant.min_sdk_version}, DPI required: ${variant.dpi}`
-				};
-			}
-		}
-	},
-
-	events: {
-		'data.fetched'(data) {
-			const { appName, version, releaseDate, variants } = data;
-
-			this.broker.call("db.mongoCreate", {
-				collection: "Apk",
-				data: {
-					app_name: appName,
-					version,
-					release_date: releaseDate,
-					variants
-				}
-			}).then(createdApk => {
-				this.broker.call("db.pgQuery", {
-					query: 'INSERT INTO apk_distribution (distribution_number, mongodb_id) VALUES ($1, $2)',
-					values: [version, createdApk._id]
-				});
-
-				this.broker.call("db.redisSet", {
-					key: `last_checked:${appName}:${version}`,
-					value: Date.now()
-				});
-
-				this.broker.emit("apk.newVersion", { appName, newVersion: version });
-			}).catch(error => {
-				console.error("Error saving APK data:", error);
-			});
-		},
-
-		'variant.fetched'(data) {
-			const { appName, version, releaseDate, variant } = data;
-
-			this.broker.call("db.mongoUpdate", {
-				collection: "Apk",
-				filter: { app_name: appName, version },
-				update: { $push: { variants: variant } }
-			}).catch(error => {
-				console.error("Error updating APK variants:", error);
-			});
+		assets: {
+			folder: "public",
 		}
 	},
 
 	methods: {
-		parseAgentString(agentString) {
-			const match = agentString.match(
-				/Instagram (\S+) Android \((\S+); (\d+)dpi; \d+x\d+; \S+; \S+; \S+; \S+; (\d+)\)/
-			);
-			if (match) {
-				return {
-					versionId: match[1],
-					androidVersion: match[2],
-					dpi: match[3],
-					variantId: match[4]
-				};
+		authorize(ctx, route, req, res) {
+			let auth = req.headers["authorization"];
+			if (auth && auth.startsWith("Bearer ")) {
+				let token = auth.slice(7);
+				try {
+					let decoded = jwt.verify(token, this.settings.JWT_SECRET);
+					ctx.meta.user = decoded;
+					return Promise.resolve(ctx);
+				} catch (err) {
+					return Promise.reject(new ApiGateway.Errors.UnAuthorizedError(ApiGateway.Errors.ERR_INVALID_TOKEN));
+				}
 			} else {
-				throw new Error("Invalid agent string");
+				return Promise.reject(new ApiGateway.Errors.UnAuthorizedError(ApiGateway.Errors.ERR_NO_TOKEN));
 			}
-		},
-
-		compareVersions(agentVersion, minVersion) {
-			return agentVersion >= minVersion;
-		},
-
-		isNewVersion(apkData) {
-			return this.redisGet(`last_checked:${apkData.app_name}:${apkData.version}`).then(lastChecked => {
-				return !lastChecked;
-			});
 		}
-	},
-
-	started() {
-		const cron = require('node-cron');
-
-		cron.schedule('*/2 * * * *', async () => {
-			const apps = [
-				{ appName: 'instagram', url: 'https://www.apkmirror.com/uploads/?appcategory=instagram-instagram' },
-				{ appName: 'tiktok', url: 'https://www.apkmirror.com/uploads/?appcategory=tiktok' },
-				{ appName: 'twitter', url: 'https://www.apkmirror.com/uploads/?appcategory=twitter' },
-				{ appName: 'youtube', url: 'https://www.apkmirror.com/uploads/?appcategory=youtube' }
-			];
-
-			for (const app of apps) {
-				await this.broker.call("scraper.scrapeApkMirrorUploads", app);
-			}
-		});
 	}
 };

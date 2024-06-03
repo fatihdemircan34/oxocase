@@ -1,197 +1,218 @@
 const DbService = require("moleculer-db");
+const mongoose = require("mongoose");
+const { PrismaClient } = require("@prisma/client");
+const { Pool } = require("pg");
+const Redis = require("ioredis");
 
 module.exports = {
-	name: "apk",
+	name: "db",
 	mixins: [DbService],
-	actions: {
-		fetchApkData: {
-			params: {
-				appName: "string",
-				url: "string"
-			},
-			async handler(ctx) {
-				await ctx.call("scraper.scrapeApkMirrorUploads", { url, appName });
-			}
-		},
 
-		getVersions: {
-			async handler(ctx) {
-				const { appName, limit = 10 } = ctx.params;
-				const apks = await ctx.call("db.mongoFind", {
-					collection: "Apk",
-					query: { appName }
-				});
+	prisma: null,
+	redis: null,
+	pgPool: null,
+	mongodb: null,
 
-				return apks.slice(0, limit).map(apk => ({
-					versionId: apk._id,
-					releaseDate: apk.release_date,
-					totalVariants: apk.variants.length
-				}));
-			}
-		},
+	async started() {
+		// Prisma Client Bağlantısı
+		this.prisma = new PrismaClient();
 
-		getVersionDetails: {
-			params: {
-				id: "string"
-			},
-			async handler(ctx) {
-				const { id } = ctx.params;
-				const apk = await ctx.call("db.mongoFind", {
-					collection: "Apk",
-					query: { _id: id }
-				});
+		// Redis Bağlantısı
+		this.redis = new Redis({
+			host: process.env.REDIS_HOST,
+			port: process.env.REDIS_PORT,
+			// password gibi diğer Redis ayarları (eğer varsa)
+		});
 
-				if (!apk) {
-					throw new Error("APK not found");
-				}
+		// PostgreSQL Bağlantı Havuzu
+		this.pgPool = new Pool({
+			user: process.env.POSTGRES_USER,
+			host: process.env.POSTGRES_HOST,
+			database: process.env.POSTGRES_DATABASE,
+			password: process.env.POSTGRES_PASSWORD,
+			port: process.env.POSTGRES_PORT,
+			idleTimeoutMillis: 30000, // Bağlantıların açık kalacağı süre (milisaniye cinsinden)
+			connectionTimeoutMillis: 5000, // Bağlantının zaman aşımı süresi (milisaniye cinsinden)
+		});
 
-				return {
-					versionId: apk._id,
-					variants: apk.variants
-				};
-			}
-		},
-
-		updateVersion: {
-			params: {
-				id: "string",
-				data: "object"
-			},
-			async handler(ctx) {
-				const { id, data } = ctx.params;
-				const updatedApk = await ctx.call("db.mongoUpdate", {
-					collection: "Apk",
-					filter: { _id: id },
-					update: { $set: data }
-				});
-				return updatedApk;
-			}
-		},
-
-		deleteVersion: {
-			params: {
-				id: "string"
-			},
-			async handler(ctx) {
-				const { id } = ctx.params;
-				await ctx.call("db.mongoDelete", {
-					collection: "Apk",
-					filter: { _id: id }
-				});
-				return { message: "APK deleted successfully" };
-			}
-		},
-
-		checkCompatibility: {
-			params: {
-				agent: "string"
-			},
-			async handler(ctx) {
-				const { agent } = ctx.params;
-				const parsedData = this.parseAgentString(agent);
-
-				const variant = await ctx.call("db.mongoFind", {
-					collection: "Variant",
-					query: { variant_id: parsedData.variantId }
-				});
-
-				if (!variant) {
-					throw new Error("Variant not found");
-				}
-
-				const isCompatible = this.compareVersions(parsedData.android_version, variant.min_sdk_version) &&
-					parsedData.dpi === variant.dpi;
-
-				return {
-					status: isCompatible ? "success" : "fail",
-					message: isCompatible ? "Compatible" : `Minimum Android version required: ${variant.min_sdk_version}, DPI required: ${variant.dpi}`
-				};
-			}
-		}
+		// MongoDB Bağlantısı
+		this.mongodb = await mongoose.connect(process.env.MONGODB_URI, {
+			useNewUrlParser: true,
+			useUnifiedTopology: true,
+		});
 	},
 
-	events: {
-		'data.fetched'(data) {
-			const { appName, version, releaseDate, variants } = data;
-
-			this.broker.call("db.mongoCreate", {
-				collection: "Apk",
-				data: {
-					app_name: appName,
-					version,
-					release_date: releaseDate,
-					variants
-				}
-			}).then(createdApk => {
-				this.broker.call("db.pgQuery", {
-					query: 'INSERT INTO apk_distribution (distribution_number, mongodb_id) VALUES ($1, $2)',
-					values: [version, createdApk._id]
-				});
-
-				this.broker.call("db.redisSet", {
-					key: `last_checked:${appName}:${version}`,
-					value: Date.now()
-				});
-
-				this.broker.emit("apk.newVersion", { appName, newVersion: version });
-			}).catch(error => {
-				console.error("Error saving APK data:", error);
-			});
-		},
-
-		'variant.fetched'(data) {
-			const { appName, version, releaseDate, variant } = data;
-
-			this.broker.call("db.mongoUpdate", {
-				collection: "Apk",
-				filter: { app_name: appName, version },
-				update: { $push: { variants: variant } }
-			}).catch(error => {
-				console.error("Error updating APK variants:", error);
-			});
-		}
+	async stopped() {
+		// MongoDB Bağlantısını Kapat
+		await this.mongodb.disconnect();
 	},
 
 	methods: {
-		parseAgentString(agentString) {
-			const match = agentString.match(
-				/Instagram (\S+) Android \((\S+); (\d+)dpi; \d+x\d+; \S+; \S+; \S+; \S+; (\d+)\)/
-			);
-			if (match) {
-				return {
-					versionId: match[1],
-					androidVersion: match[2],
-					dpi: match[3],
-					variantId: match[4]
-				};
-			} else {
-				throw new Error("Invalid agent string");
+		getModel(collection) {
+			// Modelin zaten tanımlanmış olup olmadığını kontrol et
+			if (mongoose.models[collection]) {
+				return mongoose.models[collection];
 			}
-		},
-
-		compareVersions(agentVersion, minVersion) {
-			return agentVersion >= minVersion;
-		},
-
-		isNewVersion(apkData) {
-			return this.redisGet(`last_checked:${apkData.app_name}:${apkData.version}`).then(lastChecked => {
-				return !lastChecked;
-			});
+			// Yeni bir model tanımla
+			return mongoose.model(collection, new mongoose.Schema({}, { strict: false }));
 		}
 	},
 
-	started() {
-		const cron = require('node-cron');
+	actions: {
+		// PostgreSQL İşlemleri
+		pgQuery: {
+			params: {
+				query: { type: "string", optional: false },
+				values: { type: "array", optional: true },
+			},
+			async handler(ctx) {
+				const { query, values } = ctx.params;
+				try {
+					const result = await this.pgPool.query(query, values);
+					return result.rows; // Sorgu sonucundaki satırları döndür
+				} catch (error) {
+					this.logger.error("PostgreSQL query error:", error);
 
-		cron.schedule('*/2 * * * *', async () => {
-			const apps = [
-				{ appName: 'instagram', url: 'https://www.apkmirror.com/uploads/?appcategory=instagram-instagram' },
-				{ appName: 'tiktok', url: 'https://www.apkmirror.com/uploads/?appcategory=tiktok' },
-				{ appName: 'twitter', url: 'https://www.apkmirror.com/uploads/?appcategory=twitter' },
-				{ appName: 'youtube', url: 'https://www.apkmirror.com/uploads/?appcategory=youtube' }
-			];
+				}
+			},
+		},
 
-			await Promise.all(apps.map(app => this.broker.call("scraper.scrapeApkMirrorUploads", app)));
-		});
-	}
+		// Prisma ile Veritabanı İşlemleri
+		find: {
+			params: {
+				entity: { type: "string", optional: false },
+				query: { type: "object", optional: true },
+			},
+			async handler(ctx) {
+				const { entity, query } = ctx.params;
+				return this.prisma[entity].findMany(query);
+			},
+		},
+
+		create: {
+			params: {
+				entity: { type: "string", optional: false },
+				data: { type: "object", optional: false },
+			},
+			async handler(ctx) {
+				const { entity, data } = ctx.params;
+				return await this.prisma[entity].create({ data });
+			},
+		},
+
+		update: {
+			params: {
+				entity: { type: "string", optional: false },
+				id: { type: "number", convert: true, optional: false }, // ID'yi sayıya dönüştür
+				data: { type: "object", optional: false },
+			},
+			async handler(ctx) {
+				const { entity, id, data } = ctx.params;
+				return await this.prisma[entity].update({ where: { id }, data });
+			},
+		},
+
+		delete: {
+			params: {
+				entity: { type: "string", optional: false },
+				id: { type: "number", convert: true, optional: false }, // ID'yi sayıya dönüştür
+			},
+			async handler(ctx) {
+				const { entity, id } = ctx.params;
+				await this.prisma[entity].delete({ where: { id } });
+				return { message: `${entity} deleted successfully` };
+			},
+		},
+
+		// MongoDB İşlemleri
+		mongoFind: {
+			params: {
+				collection: { type: "string", optional: false },
+				query: { type: "object", optional: true },
+			},
+			async handler(ctx) {
+				const { collection, query } = ctx.params;
+				const model = this.getModel(collection); // Modeli al
+				return await model.find(query); // Verileri MongoDB'den çekme
+			},
+		},
+
+		mongoCreate: {
+			params: {
+				collection: { type: "string", optional: false },
+				data: { type: "object", optional: false },
+			},
+			async handler(ctx) {
+				const { collection, data } = ctx.params;
+				const model = this.getModel(collection); // Modeli al
+				const newDocument = new model(data);
+				return await newDocument.save(); // MongoDB'ye kaydetme
+			},
+		},
+
+		mongoUpdate: {
+			params: {
+				collection: { type: "string", optional: false },
+				filter: { type: "object", optional: false },
+				update: { type: "object", optional: false },
+				options: { type: "object", optional: true },
+			},
+			async handler(ctx) {
+				const { collection, filter, update, options } = ctx.params;
+				const model = this.getModel(collection); // Modeli al
+				return await model.findOneAndUpdate(filter, update, options);
+			},
+		},
+
+		mongoDelete: {
+			params: {
+				collection: { type: "string", optional: false },
+				filter: { type: "object", optional: false },
+			},
+			async handler(ctx) {
+				const { collection, filter } = ctx.params;
+				const model = this.getModel(collection); // Modeli al
+				return await model.findOneAndDelete(filter);
+			},
+		},
+
+		// Redis İşlemleri
+		redisGet: {
+			params: {
+				key: { type: "string", optional: false },
+			},
+			async handler(ctx) {
+				const { key } = ctx.params;
+				try {
+					const value = await this.redis.get(key);
+					return value ? JSON.parse(value) : null; // JSON verisini ayrıştır
+				} catch (error) {
+					this.logger.error("Redis get error:", error);
+					throw new Error("Redis get failed");
+				}
+			},
+		},
+
+		redisSet: {
+			params: {
+				key: { type: "string", optional: false },
+				value: { type: "any", optional: false },
+				ttl: { type: "number", optional: true }, // Opsiyonel TTL (Time-To-Live)
+			},
+			async handler(ctx) {
+				const { key, value, ttl } = ctx.params;
+				try {
+					if (ttl) {
+						await this.redis.set(key, JSON.stringify(value), "EX", ttl); // TTL ile kaydet
+					} else {
+						await this.redis.set(key, JSON.stringify(value)); // TTL olmadan kaydet
+					}
+					return { message: "Redis set successful" };
+				} catch (error) {
+					this.logger.error("Redis set error:", error);
+					throw new Error("Redis set failed");
+				}
+			},
+		},
+	},
 };
