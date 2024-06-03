@@ -37,7 +37,7 @@ module.exports = {
 						versionId: apk._id,
 						releaseDate: apk.release_date,
 						totalVariants: apk.variants.length,
-						distributionNumber: pgRecord.distribution_number || null
+						distributionNumber: pgRecord.version || null
 					};
 				}));
 

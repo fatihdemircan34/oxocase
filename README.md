@@ -1,4 +1,4 @@
-Tabii, aşağıda Markdown formatında tam `README.md` dosyasını bulabilirsiniz:
+ 
 
 ```markdown
 # OXO4Case Projesi
